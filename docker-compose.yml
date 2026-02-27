@@ -1,0 +1,10 @@
+services:
+  db-migrator:
+    build: .
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: ["--help"]
+
