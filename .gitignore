@@ -7,4 +7,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
-
+backups/
+*.dump
+backup_*.sql

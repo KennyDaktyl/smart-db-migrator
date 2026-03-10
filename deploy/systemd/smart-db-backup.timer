@@ -1,0 +1,10 @@
+[Unit]
+Description=Run smart-db-migrator backup every night
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+Unit=smart-db-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=smart-db-migrator nightly backup job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/smart-db-migrator
+EnvironmentFile=/opt/smart-db-migrator/.env
+ExecStart=/bin/bash /opt/smart-db-migrator/scripts/nightly_backup.sh
