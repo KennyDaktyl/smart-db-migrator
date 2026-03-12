@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import sys
-import types
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,43 +16,23 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-SMART_COMMON_DIR = ROOT_DIR / "smart_common"
 MIGRATIONS_DIR = ROOT_DIR / "migrations"
 ALEMBIC_INI_PATH = ROOT_DIR / "alembic.ini"
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from scripts.migration_runtime import bootstrap_runtime
 
 ENV_TO_DB_VAR = {
     "dev": "DB_URL_DEV",
     "prod": "DB_URL_PROD",
 }
 
-
-def bootstrap() -> None:
-    load_dotenv(ROOT_DIR / ".env")
-
-    # smart_common settings expect these values even if migrations only need DB URL.
-    os.environ.setdefault("POSTGRES_PASSWORD", "placeholder")
-    os.environ.setdefault("JWT_SECRET", "placeholder")
-    os.environ.setdefault("FERNET_KEY", "placeholder")
-    os.environ.setdefault("EMAIL_HOST", "localhost")
-    os.environ.setdefault("EMAIL_FROM", "no-reply@localhost")
-
-    sys.path.insert(0, str(ROOT_DIR))
-
-    if not SMART_COMMON_DIR.exists():
-        raise SystemExit("Missing smart_common submodule. Run: git submodule update --init --recursive")
-
-    # Avoid executing heavy providers package __init__ when models import provider enums.
-    if "smart_common.providers" not in sys.modules:
-        providers_pkg = types.ModuleType("smart_common.providers")
-        providers_pkg.__path__ = [str(SMART_COMMON_DIR / "providers")]
-        sys.modules["smart_common.providers"] = providers_pkg
-
-
-bootstrap()
+SMART_COMMON_DIR = bootstrap_runtime(ROOT_DIR)
 
 import smart_common.models  # noqa: F401,E402
 from smart_common.core.db import Base  # noqa: E402
@@ -67,16 +46,19 @@ def _database_url(target_env: str) -> str:
     return url
 
 
-def _config(target_env: str) -> tuple[Config, str]:
+def _config(target_env: str, *, require_database_url: bool = True) -> tuple[Config, str | None]:
     script_location = MIGRATIONS_DIR / target_env
     if not script_location.exists():
         raise SystemExit(f"Missing migration directory: {script_location}")
 
-    database_url = _database_url(target_env)
+    database_url = _database_url(target_env) if require_database_url else os.getenv(
+        ENV_TO_DB_VAR[target_env]
+    )
     config = Config(str(ALEMBIC_INI_PATH))
     config.set_main_option("script_location", str(script_location))
     config.set_main_option("prepend_sys_path", str(ROOT_DIR))
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+    if database_url:
+        config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
     config.set_main_option("target_env", target_env)
     return config, database_url
 
@@ -340,13 +322,13 @@ def cmd_current(args: argparse.Namespace) -> int:
 
 
 def cmd_heads(args: argparse.Namespace) -> int:
-    config, _ = _config(args.env)
+    config, _ = _config(args.env, require_database_url=False)
     command.heads(config, verbose=args.verbose)
     return 0
 
 
 def cmd_history(args: argparse.Namespace) -> int:
-    config, _ = _config(args.env)
+    config, _ = _config(args.env, require_database_url=False)
     command.history(config, rev_range=args.rev_range, verbose=args.verbose)
     return 0
 
@@ -397,7 +379,7 @@ def _add_env_argument(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Manage Alembic migrations for smart_common with separate dev/prod histories."
+        description="Manage Alembic migrations from smart-common SQLAlchemy models with separate dev/prod histories."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

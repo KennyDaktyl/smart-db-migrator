@@ -4,7 +4,9 @@ services:
     working_dir: /app
     env_file:
       - .env
+    environment:
+      SMART_COMMON_PATH: /workspace/smart-common
     volumes:
       - .:/app
+      - ../smart-common:/workspace/smart-common
     command: ["--help"]
-

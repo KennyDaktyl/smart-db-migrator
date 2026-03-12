@@ -5,6 +5,13 @@ Serwis do zarzadzania migracjami SQLAlchemy/Alembic dla `smart_common` z dwoma o
 - `dev` (`migrations/dev`)
 - `prod` (`migrations/prod`)
 
+Modele SQLAlchemy sa ladowane z checkoutu `smart-common`. Migrator szuka ich kolejno w:
+- `./smart_common`
+- `../smart-common`
+- `../smart_common`
+
+Mozesz tez jawnie ustawic `SMART_COMMON_PATH` w `.env`.
+
 ## Co robi
 
 - korzysta z `smart_common` jako submodulu
@@ -40,6 +47,7 @@ Minimalnie wymagane:
 
 - `DB_URL_DEV`
 - `DB_URL_PROD`
+- opcjonalnie `SMART_COMMON_PATH`
 
 Przyklad w `.env.example`.
 
@@ -95,6 +103,17 @@ python scripts/manage_migrations.py models-diff --base origin/develop
 ## Podstawowe operacje (najprosciej przez Makefile)
 
 ```bash
+make migration-dev MESSAGE="add provider power source"
+make migration-prod MESSAGE="add provider power source"
+make apply-dev
+make apply-prod
+make current-dev
+make current-prod
+make heads-dev
+make heads-prod
+make history-dev
+make history-prod
+make promote
 make check-db
 make migrate-create-dev MSG="add provider power source"
 make migrate-create-prod MSG="add provider power source"
