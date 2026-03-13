@@ -16,7 +16,8 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine
+from alembic.util.exc import CommandError
+from sqlalchemy import create_engine, text
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MIGRATIONS_DIR = ROOT_DIR / "migrations"
@@ -93,6 +94,60 @@ def _db_is_at_head(database_url: str, config: Config) -> bool:
     return current_heads == expected_heads
 
 
+def _db_revision_rows(database_url: str) -> list[str]:
+    engine = create_engine(database_url, future=True)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(text("select version_num from alembic_version")).fetchall()
+            return [str(row[0]) for row in rows]
+    finally:
+        engine.dispose()
+
+
+def _known_revisions(config: Config) -> set[str]:
+    script = ScriptDirectory.from_config(config)
+    return {revision.revision for revision in script.walk_revisions() if revision.revision}
+
+
+def _resolve_target_revision(config: Config, revision: str) -> str:
+    if revision != "head":
+        return revision
+
+    script = ScriptDirectory.from_config(config)
+    heads = script.get_heads()
+    if len(heads) != 1:
+        raise SystemExit(
+            f"Cannot resolve single 'head' revision. Current heads: {', '.join(heads) or '<none>'}"
+        )
+    return heads[0]
+
+
+def _missing_db_revisions(database_url: str, config: Config) -> list[str]:
+    known = _known_revisions(config)
+    return [revision for revision in _db_revision_rows(database_url) if revision not in known]
+
+
+def _log_missing_revision_hint(*, database_url: str, config: Config, target_env: str) -> None:
+    current_rows = _db_revision_rows(database_url)
+    missing = _missing_db_revisions(database_url, config)
+    if not missing:
+        return
+
+    logging.error(
+        "Database %s references unknown Alembic revision(s): %s",
+        target_env,
+        ", ".join(missing),
+    )
+    logging.error("Raw alembic_version rows: %s", current_rows)
+    logging.error(
+        "Use `make doctor-%s` to inspect the state or "
+        "`make repair-%s TO=<valid_revision> FROM=%s` to repair it.",
+        target_env,
+        target_env,
+        missing[0],
+    )
+
+
 def _migration_message(message: str | None) -> str:
     if message:
         return message
@@ -134,7 +189,7 @@ def _archive_migration_files(target_env: str, files: list[Path]) -> None:
     )
 
 
-def _collect_added_column_enums(migration_file: Path) -> list[tuple[str, tuple[str, ...]]]:
+def _collect_migration_enums(migration_file: Path) -> list[tuple[str, tuple[str, ...]]]:
     source = migration_file.read_text(encoding="utf-8")
     module = ast.parse(source)
 
@@ -151,41 +206,51 @@ def _collect_added_column_enums(migration_file: Path) -> list[tuple[str, tuple[s
     seen: set[tuple[str, tuple[str, ...]]] = set()
 
     for node in ast.walk(upgrade_fn):
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Attribute) or node.func.attr != "add_column":
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
 
-        for arg in node.args:
-            if not isinstance(arg, ast.Call):
+        enum_calls: list[ast.Call] = []
+        if node.func.attr == "add_column":
+            for arg in node.args:
+                if not isinstance(arg, ast.Call):
+                    continue
+                if not isinstance(arg.func, ast.Attribute) or arg.func.attr != "Column":
+                    continue
+                enum_calls.extend(
+                    col_arg
+                    for col_arg in arg.args
+                    if isinstance(col_arg, ast.Call)
+                    and isinstance(col_arg.func, ast.Attribute)
+                    and col_arg.func.attr == "Enum"
+                )
+        elif node.func.attr == "alter_column":
+            for keyword in node.keywords:
+                if keyword.arg != "type_" or not isinstance(keyword.value, ast.Call):
+                    continue
+                if not isinstance(keyword.value.func, ast.Attribute):
+                    continue
+                if keyword.value.func.attr == "Enum":
+                    enum_calls.append(keyword.value)
+
+        for enum_call in enum_calls:
+            enum_values: list[str] = []
+            for enum_arg in enum_call.args:
+                if isinstance(enum_arg, ast.Constant) and isinstance(enum_arg.value, str):
+                    enum_values.append(enum_arg.value)
+
+            name_value: str | None = None
+            for kw in enum_call.keywords:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    name_value = kw.value.value
+                    break
+
+            if not enum_values or not name_value:
                 continue
-            if not isinstance(arg.func, ast.Attribute) or arg.func.attr != "Column":
-                continue
 
-            for col_arg in arg.args:
-                if not isinstance(col_arg, ast.Call):
-                    continue
-                if not isinstance(col_arg.func, ast.Attribute) or col_arg.func.attr != "Enum":
-                    continue
-
-                enum_values: list[str] = []
-                for enum_arg in col_arg.args:
-                    if isinstance(enum_arg, ast.Constant) and isinstance(enum_arg.value, str):
-                        enum_values.append(enum_arg.value)
-
-                name_value: str | None = None
-                for kw in col_arg.keywords:
-                    if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                        name_value = kw.value.value
-                        break
-
-                if not enum_values or not name_value:
-                    continue
-
-                key = (name_value, tuple(enum_values))
-                if key not in seen:
-                    seen.add(key)
-                    collected.append(key)
+            key = (name_value, tuple(enum_values))
+            if key not in seen:
+                seen.add(key)
+                collected.append(key)
 
     return collected
 
@@ -200,7 +265,7 @@ def _var_name_from_enum_name(enum_name: str) -> str:
 
 
 def _add_enum_create_drop_to_migration(migration_file: Path) -> bool:
-    enum_defs = _collect_added_column_enums(migration_file)
+    enum_defs = _collect_migration_enums(migration_file)
     if not enum_defs:
         return False
 
@@ -273,6 +338,61 @@ def _add_enum_create_drop_to_migration(migration_file: Path) -> bool:
     return True
 
 
+def _add_postgresql_using_for_enum_alters(migration_file: Path) -> bool:
+    source = migration_file.read_text(encoding="utf-8")
+    module = ast.parse(source)
+    lines = source.splitlines()
+    changed = False
+
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "alter_column" or len(node.args) < 2:
+            continue
+
+        table_arg, column_arg = node.args[:2]
+        if not (
+            isinstance(table_arg, ast.Constant)
+            and isinstance(table_arg.value, str)
+            and isinstance(column_arg, ast.Constant)
+            and isinstance(column_arg.value, str)
+        ):
+            continue
+
+        enum_name: str | None = None
+        has_using = False
+        for keyword in node.keywords:
+            if keyword.arg == "postgresql_using":
+                has_using = True
+            if keyword.arg != "type_" or not isinstance(keyword.value, ast.Call):
+                continue
+            if not isinstance(keyword.value.func, ast.Attribute) or keyword.value.func.attr != "Enum":
+                continue
+            for enum_kw in keyword.value.keywords:
+                if (
+                    enum_kw.arg == "name"
+                    and isinstance(enum_kw.value, ast.Constant)
+                    and isinstance(enum_kw.value.value, str)
+                ):
+                    enum_name = enum_kw.value.value
+                    break
+
+        if enum_name is None or has_using or node.end_lineno is None:
+            continue
+
+        insert_at = node.end_lineno - 1
+        indent = " " * 15
+        lines.insert(
+            insert_at,
+            f"{indent}postgresql_using='{column_arg.value}::{enum_name}',",
+        )
+        changed = True
+
+    if changed:
+        migration_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
 def cmd_create(args: argparse.Namespace) -> int:
     config, database_url = _config(args.env)
     if not _has_schema_changes(database_url):
@@ -292,10 +412,15 @@ def cmd_create(args: argparse.Namespace) -> int:
     if args.archive:
         _archive_migration_files(args.env, created_files)
 
-    patched_files = [file for file in created_files if _add_enum_create_drop_to_migration(file)]
-    if patched_files:
-        for file in patched_files:
+    enum_patch_files = [file for file in created_files if _add_enum_create_drop_to_migration(file)]
+    if enum_patch_files:
+        for file in enum_patch_files:
             logging.info("Added explicit PostgreSQL enum create/drop to %s.", file.name)
+
+    using_patch_files = [file for file in created_files if _add_postgresql_using_for_enum_alters(file)]
+    if using_patch_files:
+        for file in using_patch_files:
+            logging.info("Added postgresql_using casts for enum alters to %s.", file.name)
 
     logging.info("Created migration for %s.", args.env)
     return 0
@@ -303,21 +428,51 @@ def cmd_create(args: argparse.Namespace) -> int:
 
 def cmd_apply(args: argparse.Namespace) -> int:
     config, _ = _config(args.env)
-    command.upgrade(config, args.revision)
+    try:
+        command.upgrade(config, args.revision)
+    except CommandError as exc:
+        database_url = _database_url(args.env)
+        _log_missing_revision_hint(
+            database_url=database_url,
+            config=config,
+            target_env=args.env,
+        )
+        logging.error(str(exc))
+        return 1
     logging.info("Applied migrations for %s up to %s.", args.env, args.revision)
     return 0
 
 
 def cmd_stamp(args: argparse.Namespace) -> int:
     config, _ = _config(args.env)
-    command.stamp(config, args.revision)
+    try:
+        command.stamp(config, args.revision)
+    except CommandError as exc:
+        database_url = _database_url(args.env)
+        _log_missing_revision_hint(
+            database_url=database_url,
+            config=config,
+            target_env=args.env,
+        )
+        logging.error(str(exc))
+        return 1
     logging.info("Stamped %s database to %s.", args.env, args.revision)
     return 0
 
 
 def cmd_current(args: argparse.Namespace) -> int:
     config, _ = _config(args.env)
-    command.current(config, verbose=args.verbose)
+    try:
+        command.current(config, verbose=args.verbose)
+    except CommandError as exc:
+        database_url = _database_url(args.env)
+        _log_missing_revision_hint(
+            database_url=database_url,
+            config=config,
+            target_env=args.env,
+        )
+        logging.error(str(exc))
+        return 1
     return 0
 
 
@@ -370,6 +525,73 @@ def cmd_models_diff(args: argparse.Namespace) -> int:
         print(output)
     else:
         print(f"No changes in smart_common/models for {args.base}..HEAD")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config, database_url = _config(args.env)
+    current_rows = _db_revision_rows(database_url)
+    known = _known_revisions(config)
+    missing = [revision for revision in current_rows if revision not in known]
+    heads = ScriptDirectory.from_config(config).get_heads()
+
+    print(f"smart_common_dir={SMART_COMMON_DIR}")
+    print(f"database_env={args.env}")
+    print(f"database_url_var={ENV_TO_DB_VAR[args.env]}")
+    print(f"db_current_rows={current_rows}")
+    print(f"local_heads={list(heads)}")
+    print(f"unknown_db_revisions={missing}")
+
+    if not missing:
+        print(f"schema_changes_pending={_has_schema_changes(database_url)}")
+
+    return 0 if not missing else 1
+
+
+def cmd_repair_revision(args: argparse.Namespace) -> int:
+    config, database_url = _config(args.env)
+    target_revision = _resolve_target_revision(config, args.to_revision)
+    known = _known_revisions(config)
+    if target_revision not in known:
+        raise SystemExit(f"Target revision {target_revision!r} does not exist in local history.")
+
+    current_rows = _db_revision_rows(database_url)
+    if not current_rows:
+        raise SystemExit("alembic_version is empty; use normal Alembic stamp/apply flow instead.")
+
+    if args.from_revision:
+        matching = [revision for revision in current_rows if revision == args.from_revision]
+        if not matching:
+            raise SystemExit(
+                f"Current alembic_version rows {current_rows} do not contain {args.from_revision!r}."
+            )
+    elif len(current_rows) != 1:
+        raise SystemExit(
+            "Multiple alembic_version rows detected. Pass FROM=<broken_revision> explicitly."
+        )
+
+    missing = [revision for revision in current_rows if revision not in known]
+    if not missing and target_revision in current_rows:
+        logging.info("Database %s already points at %s. Nothing to repair.", args.env, target_revision)
+        return 0
+
+    engine = create_engine(database_url, future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("delete from alembic_version"))
+            connection.execute(
+                text("insert into alembic_version (version_num) values (:revision)"),
+                {"revision": target_revision},
+            )
+    finally:
+        engine.dispose()
+
+    logging.info(
+        "Repaired alembic_version for %s: %s -> %s",
+        args.env,
+        current_rows,
+        target_revision,
+    )
     return 0
 
 
@@ -429,6 +651,29 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("--verbose", action="store_true", help="Show detailed output.")
     history_parser.add_argument("--rev-range", help="Alembic revision range, e.g. base:head.")
     history_parser.set_defaults(func=cmd_history)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Inspect local migration graph and raw alembic_version rows.",
+    )
+    _add_env_argument(doctor_parser)
+    doctor_parser.set_defaults(func=cmd_doctor)
+
+    repair_parser = subparsers.add_parser(
+        "repair-revision",
+        help="Repair alembic_version when DB references a missing revision.",
+    )
+    _add_env_argument(repair_parser)
+    repair_parser.add_argument(
+        "--to-revision",
+        required=True,
+        help="Valid local revision to write into alembic_version (e.g. c91b4d3a7e10 or head).",
+    )
+    repair_parser.add_argument(
+        "--from-revision",
+        help="Optional broken current revision to assert before repair.",
+    )
+    repair_parser.set_defaults(func=cmd_repair_revision)
 
     promote_parser = subparsers.add_parser(
         "promote", help="Copy a migration from dev versions to prod versions."

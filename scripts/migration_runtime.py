@@ -17,9 +17,9 @@ def resolve_smart_common_dir(root_dir: Path) -> Path:
 
     candidates.extend(
         [
-            root_dir / "smart_common",
             root_dir.parent / "smart-common",
             root_dir.parent / "smart_common",
+            root_dir / "smart_common",
         ]
     )
 
