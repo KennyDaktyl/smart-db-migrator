@@ -1,5 +1,1 @@
-alembic==1.17.1
-python-dotenv==1.2.1
-SQLAlchemy==2.0.45
-psycopg2-binary==2.9.11
-
+-r smart_common/requirements.txt
