@@ -5,6 +5,13 @@ Serwis do zarzadzania migracjami SQLAlchemy/Alembic dla `smart_common` z dwoma o
 - `dev` (`migrations/dev`)
 - `prod` (`migrations/prod`)
 
+Modele SQLAlchemy sa ladowane z checkoutu `smart-common`. Migrator szuka ich kolejno w:
+- `./smart_common`
+- `../smart-common`
+- `../smart_common`
+
+Mozesz tez jawnie ustawic `SMART_COMMON_PATH` w `.env`.
+
 ## Co robi
 
 - korzysta z `smart_common` jako submodulu
@@ -16,11 +23,19 @@ Serwis do zarzadzania migracjami SQLAlchemy/Alembic dla `smart_common` z dwoma o
 
 ## Szybki start
 
-1. Zainicjalizuj submodul:
+1. Jesli naprawde chcesz uzyc submodulu, zainicjalizuj tylko `smart_common`:
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init smart_common
 ```
+
+Rekomendowany wariant:
+
+```bash
+export SMART_COMMON_PATH=/home/mpielak/Pulpit/home/smart-common
+```
+
+To omija lokalny submodule i zawsze bierze modele z glownego checkoutu `smart-common`.
 
 2. Przygotuj env:
 
@@ -40,6 +55,7 @@ Minimalnie wymagane:
 
 - `DB_URL_DEV`
 - `DB_URL_PROD`
+- opcjonalnie `SMART_COMMON_PATH`
 
 Przyklad w `.env.example`.
 
@@ -95,6 +111,21 @@ python scripts/manage_migrations.py models-diff --base origin/develop
 ## Podstawowe operacje (najprosciej przez Makefile)
 
 ```bash
+make migration-dev MESSAGE="add provider power source"
+make migration-prod MESSAGE="add provider power source"
+make apply-dev
+make apply-prod
+make current-dev
+make current-prod
+make heads-dev
+make heads-prod
+make history-dev
+make history-prod
+make doctor-dev
+make doctor-prod
+make repair-dev TO=c91b4d3a7e10 FROM=70c809c27c09
+make repair-prod TO=<revision> FROM=<broken_revision>
+make promote
 make check-db
 make migrate-create-dev MSG="add provider power source"
 make migrate-create-prod MSG="add provider power source"
@@ -186,3 +217,15 @@ Przyklad utworzenia migracji:
 ```bash
 docker compose run --rm db-migrator create --env dev -m "new migration"
 ```
+
+## Naprawa zerwanej historii Alembica
+
+Jesli baza ma w `alembic_version` rewizje, ktorej nie ma juz w lokalnym repo, uzyj:
+
+```bash
+make doctor-dev
+make repair-dev TO=c91b4d3a7e10 FROM=70c809c27c09
+make apply-dev
+```
+
+`repair-dev` robi swiadoma naprawe wpisu `alembic_version` bez recznego SQL.

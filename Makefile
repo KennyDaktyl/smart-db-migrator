@@ -1,8 +1,8 @@
-PYTHON ?= ./env/bin/python
+PYTHON ?= $(shell if [ -x ./env/bin/python ]; then echo ./env/bin/python; elif command -v python3 >/dev/null 2>&1; then command -v python3; else command -v python; fi)
 MIG ?= $(PYTHON) scripts/manage_migrations.py
 DB ?= $(PYTHON) scripts/db_ops.py
 
-.PHONY: help check-db migrate-create-dev migrate-create-prod migrate-create-apply-dev migrate-create-apply-prod migrate-current-dev migrate-current-prod migrate-heads-dev migrate-heads-prod migrate-apply-dev migrate-apply-prod backup-all backup-dev backup-prod restore-dev restore-prod nightly-backup
+.PHONY: help check-db migrate-create-dev migrate-create-prod migrate-create-apply-dev migrate-create-apply-prod migrate-current-dev migrate-current-prod migrate-heads-dev migrate-heads-prod migrate-apply-dev migrate-apply-prod backup-all backup-dev backup-prod restore-dev restore-prod nightly-backup migration-dev migration-prod apply-dev apply-prod current-dev current-prod heads-dev heads-prod history-dev history-prod promote doctor-dev doctor-prod repair-dev repair-prod
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,9 @@ help:
 	@echo "  make migrate-current-dev | migrate-current-prod"
 	@echo "  make migrate-heads-dev   | migrate-heads-prod"
 	@echo "  make migrate-apply-dev   | migrate-apply-prod"
+	@echo "  make doctor-dev | doctor-prod"
+	@echo "  make repair-dev TO=<revision> [FROM=<broken_revision>]"
+	@echo "  make repair-prod TO=<revision> [FROM=<broken_revision>]"
 	@echo "  make backup-all | backup-dev | backup-prod"
 	@echo "  make restore-dev FILE=/abs/path/file.dump"
 	@echo "  make restore-prod FILE=/abs/path/file.dump"
@@ -26,9 +29,17 @@ migrate-create-dev:
 	@test -n "$(MSG)" || (echo "Use: make migrate-create-dev MSG='migration message'" && exit 1)
 	$(MIG) create --env dev -m "$(MSG)"
 
+migration-dev:
+	@test -n "$(MESSAGE)" || (echo "Use: make migration-dev MESSAGE='migration message'" && exit 1)
+	$(MIG) create --env dev -m "$(MESSAGE)"
+
 migrate-create-prod:
 	@test -n "$(MSG)" || (echo "Use: make migrate-create-prod MSG='migration message'" && exit 1)
 	$(MIG) create --env prod -m "$(MSG)"
+
+migration-prod:
+	@test -n "$(MESSAGE)" || (echo "Use: make migration-prod MESSAGE='migration message'" && exit 1)
+	$(MIG) create --env prod -m "$(MESSAGE)"
 
 migrate-create-apply-dev:
 	@test -n "$(MSG)" || (echo "Use: make migrate-create-apply-dev MSG='migration message'" && exit 1)
@@ -43,20 +54,61 @@ migrate-create-apply-prod:
 migrate-current-dev:
 	$(MIG) current --env dev --verbose
 
+current-dev:
+	$(MIG) current --env dev --verbose
+
 migrate-current-prod:
+	$(MIG) current --env prod --verbose
+
+current-prod:
 	$(MIG) current --env prod --verbose
 
 migrate-heads-dev:
 	$(MIG) heads --env dev --verbose
 
+heads-dev:
+	$(MIG) heads --env dev --verbose
+
 migrate-heads-prod:
+	$(MIG) heads --env prod --verbose
+
+heads-prod:
 	$(MIG) heads --env prod --verbose
 
 migrate-apply-dev:
 	$(MIG) apply --env dev
 
+apply-dev:
+	$(MIG) apply --env dev
+
 migrate-apply-prod:
 	$(MIG) apply --env prod
+
+apply-prod:
+	$(MIG) apply --env prod
+
+history-dev:
+	$(MIG) history --env dev --rev-range base:heads
+
+history-prod:
+	$(MIG) history --env prod --rev-range base:heads
+
+doctor-dev:
+	$(MIG) doctor --env dev
+
+doctor-prod:
+	$(MIG) doctor --env prod
+
+repair-dev:
+	@test -n "$(TO)" || (echo "Use: make repair-dev TO=<revision> [FROM=<broken_revision>]" && exit 1)
+	$(MIG) repair-revision --env dev --to-revision "$(TO)" $(if $(FROM),--from-revision "$(FROM)")
+
+repair-prod:
+	@test -n "$(TO)" || (echo "Use: make repair-prod TO=<revision> [FROM=<broken_revision>]" && exit 1)
+	$(MIG) repair-revision --env prod --to-revision "$(TO)" $(if $(FROM),--from-revision "$(FROM)")
+
+promote:
+	$(MIG) promote
 
 backup-all:
 	$(DB) backup --env all

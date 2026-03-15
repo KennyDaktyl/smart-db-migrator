@@ -2,29 +2,18 @@ from __future__ import annotations
 
 import os
 import sys
-import types
 from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from dotenv import load_dotenv
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
-load_dotenv(ROOT_DIR / ".env")
 sys.path.insert(0, str(ROOT_DIR))
 
-os.environ.setdefault("POSTGRES_PASSWORD", "placeholder")
-os.environ.setdefault("JWT_SECRET", "placeholder")
-os.environ.setdefault("FERNET_KEY", "placeholder")
-os.environ.setdefault("EMAIL_HOST", "localhost")
-os.environ.setdefault("EMAIL_FROM", "no-reply@localhost")
+from scripts.migration_runtime import bootstrap_runtime
 
-if "smart_common.providers" not in sys.modules:
-    providers_pkg = types.ModuleType("smart_common.providers")
-    providers_pkg.__path__ = [str(ROOT_DIR / "smart_common" / "providers")]
-    sys.modules["smart_common.providers"] = providers_pkg
+bootstrap_runtime(ROOT_DIR)
 
 import smart_common.models  # noqa: F401,E402
 from smart_common.core.db import Base  # noqa: E402
